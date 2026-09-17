@@ -1,0 +1,26 @@
+# Checkpoint model (quá lớn cho GitHub — giới hạn 100 MB/file)
+*.pt
+*.pth
+*.pth.tar
+*.ckpt
+*.bin
+*.safetensors
+
+# Feature trích xuất ra và file tạm
+*.npy
+*.tmp.npy
+failed_*_shard*.txt
+no_audio_track_shard*.txt
+bench/
+feats/
+
+# Dữ liệu video / audio
+*.mp4
+*.mkv
+*.webm
+*.wav
+
+# Python / Jupyter
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
