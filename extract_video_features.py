@@ -128,6 +128,8 @@ def main():
             if not feats:
                 raise RuntimeError("không đọc được frame nào")
             feats = np.concatenate(feats, axis=0).astype(np.float32)
+            if not np.isfinite(feats).all():
+                raise RuntimeError(f"feature có NaN/inf (tràn số với dtype={args.dtype}) -> thử --dtype bf16")
             save_npy_atomic(out_name(vid), feats)
         except Exception as e:
             print(f"[lỗi] {vid}: {e}")
