@@ -24,8 +24,8 @@ import numpy as np
 import torch
 
 from onepeace_video_backbone import IMG_MEAN, IMG_STD, load_k400_checkpoint
-from video_io import (find_ffmpeg, iter_clips, iter_video_frames, list_video_ids, prefetch,
-                      save_npy_atomic, shard)
+from video_io import (find_ffmpeg, iter_clips, iter_video_frames, list_video_ids, num_windows, prefetch,
+                      probe_duration, save_npy_atomic, shard)
 
 
 def parse_args():
@@ -51,6 +51,7 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None, help="chỉ xử lý N video đầu (để thử)")
     p.add_argument("--max_clips", type=int, default=None, help="chỉ lấy N clip đầu mỗi video (để thử)")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--log_every", type=float, default=60, help="in tiến độ trong video mỗi N giây")
     return p.parse_args()
 
 
@@ -73,14 +74,14 @@ def main():
         ids = ids[:args.limit]
     out_name = lambda vid: os.path.join(args.output_dir, f"{vid}_one_peace_video_finetune.npy")
     todo = [v for v in ids if args.overwrite or not os.path.exists(out_name(v))]
-    print(f"{len(ids)} video trong shard {args.shard_id}/{args.num_shards}, còn {len(todo)} video cần xử lý")
+    print(f"{len(ids)} video trong shard {args.shard_id}/{args.num_shards}, còn {len(todo)} video cần xử lý", flush=True)
     if not todo:
         return
 
     t0 = time.time()
     model = load_k400_checkpoint(args.checkpoint, use_sdpa=not args.no_sdpa)
     model = model.to(device=device, dtype=dtype)
-    print(f"Nạp model xong ({time.time() - t0:.0f}s), num_frames={model.num_frames}, dtype={dtype}")
+    print(f"Nạp model xong ({time.time() - t0:.0f}s), num_frames={model.num_frames}, dtype={dtype}", flush=True)
     assert args.num_frames == model.num_frames, "checkpoint K400 dùng đúng 16 frame / clip"
 
     mean = torch.tensor(IMG_MEAN, device=device, dtype=torch.float32).view(1, 3, 1, 1, 1)
@@ -101,14 +102,27 @@ def main():
         try:
             clips_iter = iter_clips(iter_video_frames(path, args.fps, args.size, ffmpeg, args.resize_backend),
                                     args.num_frames, args.stride)
-            feats, batch = [], []
+            # số clip dự kiến, để in tiến độ trong video (script chỉ ghi .npy khi xong cả video)
+            duration = probe_duration(path, ffmpeg) or 0.0
+            n_expected = num_windows(int(duration * args.fps), args.num_frames, args.stride)
+            if args.max_clips is not None:
+                n_expected = min(n_expected, args.max_clips)
+            print(f"[{i + 1}/{len(todo)}] {vid}: {duration:.0f}s ~ {n_expected} clip", flush=True)
+            feats, batch, done, t_log = [], [], 0, time.time()
             for j, clip in enumerate(prefetch(clips_iter, max_items=args.batch_size * 3)):
                 if args.max_clips is not None and j >= args.max_clips:
                     break
                 batch.append(clip)
                 if len(batch) == args.batch_size:
                     feats.append(encode(batch))
+                    done += len(batch)
                     batch = []
+                    if time.time() - t_log > args.log_every:
+                        rate = done / (time.time() - t_vid)
+                        eta = max(n_expected - done, 0) / max(rate, 1e-9)
+                        print(f"    {done}/{n_expected} clip | {rate:.2f} clip/s | còn ~{eta / 60:.1f} phút cho video này",
+                              flush=True)
+                        t_log = time.time()
             if batch:
                 feats.append(encode(batch))
             if not feats:
@@ -125,8 +139,8 @@ def main():
             continue
         total_clips += len(feats)
         speed = total_clips / (time.time() - t_start)
-        print(f"[{i + 1}/{len(todo)}] {vid}: {feats.shape} trong {time.time() - t_vid:.1f}s "
-              f"| TB {speed:.2f} clip/s")
+        print(f"[{i + 1}/{len(todo)}] {vid}: XONG {feats.shape} trong {(time.time() - t_vid) / 60:.1f} phút "
+              f"| TB {speed:.2f} clip/s", flush=True)
 
 
 if __name__ == "__main__":
