@@ -12,25 +12,32 @@ Kết quả cuối cùng: mỗi video có 2 file trong thư mục feature, đún
 
 ## 0. Chuẩn bị (làm 1 lần)
 
-### 0.1 Upload lên Google Drive
+### 0.1 Chuẩn bị trên Google Drive
 
-| Cần upload | Dung lượng | Ghi chú |
+| Thứ | Ở đâu | Ghi chú |
 |---|---|---|
-| Thư mục `One_Peace` | ~12 GB | **Bỏ** `one-peace.pt` (15.5 GB) vì không cần |
-| `YouCookII/videos` | 29 GB | các file `<video_id>.mp4` |
+| Code `One_Peace` | clone từ GitHub (vào Drive hoặc `/content`) | `.gitignore` đã loại checkpoint, nên repo không chứa model |
+| `onepeace_video_k400.pth` (6.6 GB) | upload lên Drive, thư mục tuỳ ý | checkpoint visual |
+| `one-peace-audio.pt` (5.7 GB) | upload lên Drive, thư mục tuỳ ý | checkpoint audio (không cần `one-peace.pt` 15.5 GB) |
+| `YouCookII/videos` (29 GB) | upload lên Drive | các file `<video_id>.mp4` |
 
-Ví dụ bố cục trên Drive (đặt chỗ khác cũng được, chỉ cần sửa đường dẫn ở bước 1.2):
+Ví dụ bố cục (đặt khác cũng được, chỉ cần sửa đường dẫn ở bước 1.2):
 ```
 MyDrive/
 └── KL/
-    ├── One_Peace/
+    ├── One_Peace/                       ← git clone từ GitHub
     │   ├── run_colab.ipynb
     │   ├── extract_video_features.py, extract_audio_features.py, ...
-    │   ├── onepeace_video_k400.pth      (6.6 GB — checkpoint visual)
-    │   ├── one-peace-audio.pt           (5.7 GB — checkpoint audio)
     │   └── annotations/youcookii_all.json
+    ├── checkpoints/
+    │   ├── onepeace_video_k400.pth
+    │   └── one-peace-audio.pt
     └── YouCookII/
         └── videos/*.mp4
+```
+Clone code vào Drive (chạy trong một ô Colab sau khi mount Drive):
+```bash
+!git clone <URL repo GitHub của bạn> /content/drive/MyDrive/KL/One_Peace
 ```
 Thư mục feature (`MyDrive/KL/feats/youcookii`) sẽ được tạo tự động.
 
@@ -47,10 +54,15 @@ Với stride 0.5 s: khoảng **6 GB visual + 6 GB audio**.
 
 ### 1.2 Sửa đường dẫn — chỉ ở ô số 2
 ```python
-ONE_PEACE_DIR = '/content/drive/MyDrive/KL/One_Peace'          # thư mục chứa code + 2 checkpoint
-VIDEO_DIR     = '/content/drive/MyDrive/KL/YouCookII/videos'   # thư mục chứa .mp4
-FEAT_DIR      = '/content/drive/MyDrive/KL/feats/youcookii'    # nơi ghi feature .npy
+ONE_PEACE_DIR = '/content/drive/MyDrive/KL/One_Peace'                         # thư mục code (bản clone)
+VIDEO_CKPT    = '/content/drive/MyDrive/KL/checkpoints/onepeace_video_k400.pth' # checkpoint visual
+AUDIO_CKPT    = '/content/drive/MyDrive/KL/checkpoints/one-peace-audio.pt'      # checkpoint audio
+VIDEO_DIR     = '/content/drive/MyDrive/KL/YouCookII/videos'                    # thư mục chứa .mp4
+FEAT_DIR      = '/content/drive/MyDrive/KL/feats/youcookii'                     # nơi ghi feature .npy
 ```
+Notebook tự copy 2 checkpoint từ Drive ra `/content/ckpt/` (ô A1, B1) để nạp nhanh hơn;
+hai biến `VIDEO_CKPT_LOCAL`, `AUDIO_CKPT_LOCAL` ở cuối ô 2 không cần sửa.
+
 Cách lấy đúng đường dẫn: sau khi chạy ô 1, bấm biểu tượng 📁 bên trái Colab → mở `drive/MyDrive/...` →
 chuột phải vào thư mục → **Copy path**.
 
@@ -68,7 +80,7 @@ Các tham số còn lại trong ô 2 **giữ nguyên** để sát bài báo:
 
 **Ô 1 → 3 (luôn chạy đầu tiên):**
 - Ô 1 hỏi quyền truy cập Drive → bấm cho phép.
-- Ô 3 phải in `OK` cho mọi dòng và in số video khoảng 1500. Nếu có dòng `THIẾU` thì sửa lại ô 2.
+- Ô 3 phải in `OK` cho mọi dòng (thư mục code, 2 checkpoint, thư mục video, annotation) và in số video khoảng 1500. Nếu có dòng `THIẾU` thì sửa lại ô 2.
 
 **Phần A — Visual:**
 
@@ -131,10 +143,11 @@ Mọi phiên phải dùng **cùng `NUM_SHARDS`** và cùng `FEAT_DIR`. Có thể
 |---|---|
 | Ô 3 báo `THIẾU` | Sai đường dẫn ở ô 2 → dùng **Copy path** như mục 1.2 |
 | `torch.cuda.OutOfMemoryError` | Giảm `BATCH_VIDEO` (hoặc `BATCH_AUDIO`) ở ô 2, chạy lại ô 2 rồi ô chạy thật |
-| Ô A2 không ra "making a sandwich" | Tiền xử lý hoặc checkpoint sai. Kiểm tra `onepeace_video_k400.pth` đủ 6 629 055 726 byte |
+| Ô A2 không ra "making a sandwich" | Tiền xử lý hoặc checkpoint sai. Kiểm tra `onepeace_video_k400.pth` đủ 6 629 055 726 byte (ô A1 in kích thước) |
+| Ô A1/B1 copy checkpoint rất lâu hoặc lỗi | Drive đang đồng bộ file chưa xong; đợi upload xong hẳn. File copy dở thì xoá `/content/ckpt/*` rồi chạy lại ô |
 | B1 báo lỗi cài `omegaconf` | Chưa hạ pip → chạy lại cả ô B1 từ đầu |
 | B2 báo `No module named ...` | Chạy nhầm bằng `python` thay vì `/content/op310/bin/python`, hoặc chưa chạy B1 trong phiên này |
-| B2 báo `checkpoint không khớp model` | Sai file checkpoint → phải là `one-peace-audio.pt` tạo bởi `slim_audio_checkpoint.py` |
+| B2 báo `checkpoint không khớp model` | `AUDIO_CKPT` trỏ sai file → phải là `one-peace-audio.pt` tạo bởi `slim_audio_checkpoint.py` |
 | Có file `failed_video_shard*.txt` / `failed_audio_shard*.txt` trong `FEAT_DIR` | Danh sách video lỗi (thường do mp4 hỏng). Mở file xem lý do; chạy lại ô chạy thật để thử lại các video đó |
 | Có file `no_audio_track_shard*.txt` | Video không có âm thanh → đã được thay bằng im lặng, không cần làm gì |
 | Ô C báo thiếu file | Một phần (A hoặc B) chưa xong, hoặc có shard chưa chạy |
@@ -150,7 +163,7 @@ cd <thư mục One_Peace>
 
 # Visual (Python bất kỳ có torch + einops + opencv; cần ffmpeg)
 python extract_video_features.py \
-    --checkpoint onepeace_video_k400.pth \
+    --checkpoint <đường dẫn onepeace_video_k400.pth> \
     --video_dir  <thư mục mp4> \
     --output_dir <thư mục feature> \
     --ids_from   annotations/youcookii_all.json \
@@ -159,7 +172,7 @@ python extract_video_features.py \
 # Audio (Python 3.10 + thư viện như ô B1; cần repo ONE-PEACE)
 python extract_audio_features.py \
     --onepeace_repo <thư mục ONE-PEACE đã git clone> \
-    --checkpoint one-peace-audio.pt \
+    --checkpoint <đường dẫn one-peace-audio.pt> \
     --video_dir  <thư mục mp4> \
     --output_dir <thư mục feature> \
     --ids_from   annotations/youcookii_all.json \
