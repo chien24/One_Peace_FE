@@ -10,6 +10,12 @@ Kết quả: <output_dir>/<video_id>_one_peace_audio.npy, shape (T, 1536), float
 Bước thời gian phải khớp visual: stride_sec = stride_frame / 16
   (0.25 s <-> stride 4 frame, 0.5 s <-> stride 8 frame).
 
+Nguồn audio (chọn một):
+  --video_dir <thư mục mp4>  : (mặc định dùng) lấy track âm thanh trong mp4, giải mã + resample
+                               trùng tuyệt đối với librosa.load(sr=16000) của code gốc.
+  --audio_dir <thư mục wav>  : đọc <video_id>.wav bằng librosa.load(sr=16000). Chỉ sát bản gốc nếu wav
+                               giữ sample rate gốc hoặc được resample bằng librosa (không phải ffmpeg -ar 16000).
+
 Cần repo ONE-PEACE + fairseq đi kèm (xem README.md), checkpoint one-peace.pt hoặc bản
 đã tách bằng slim_audio_checkpoint.py.
 
@@ -29,7 +35,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from video_io import find_ffmpeg, list_video_ids, load_audio, num_windows, probe_duration, save_npy_atomic, shard
+from video_io import (find_ffmpeg, list_video_ids, load_audio, load_audio_file, num_windows, probe_duration,
+                      save_npy_atomic, shard)
 
 SR = 16000
 
@@ -38,7 +45,9 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--onepeace_repo", required=True, help="thư mục clone của https://github.com/OFA-Sys/ONE-PEACE")
     p.add_argument("--checkpoint", required=True, help="one-peace.pt hoặc one-peace-audio.pt")
-    p.add_argument("--video_dir", required=True)
+    p.add_argument("--video_dir", default=None, help="thư mục mp4 (khi audio nằm trong video)")
+    p.add_argument("--audio_dir", default=None, help="thư mục <video_id>.wav (khi đã tách audio riêng)")
+    p.add_argument("--audio_ext", default=".wav")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--ids_from", default=None)
     p.add_argument("--video_ext", default=".mp4")
@@ -54,7 +63,10 @@ def parse_args():
     p.add_argument("--shard_id", type=int, default=0)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--overwrite", action="store_true")
-    return p.parse_args()
+    args = p.parse_args()
+    if bool(args.video_dir) == bool(args.audio_dir):
+        p.error("chọn đúng một nguồn audio: --video_dir hoặc --audio_dir")
+    return args
 
 
 def load_onepeace_audio_model(repo: str, checkpoint: str, device: str, dtype: str):
@@ -120,8 +132,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     window, hop = int(round(args.window_sec * SR)), int(round(args.stride_sec * SR))
 
-    ffmpeg = find_ffmpeg()
-    ids = shard(list_video_ids(args.video_dir, args.ids_from, args.video_ext), args.num_shards, args.shard_id)
+    src_dir, src_ext = (args.audio_dir, args.audio_ext) if args.audio_dir else (args.video_dir, args.video_ext)
+    ffmpeg = None if args.audio_dir else find_ffmpeg()
+    all_ids = list_video_ids(src_dir, args.ids_from, src_ext)
+    if args.ids_from:
+        wanted = list_video_ids(src_dir, args.ids_from, src_ext, must_exist=False)
+        missing = sorted(set(wanted) - set(all_ids))
+        if missing:
+            print(f"[warn] {len(missing)} video trong {args.ids_from} không có file {src_ext} trong {src_dir}, "
+                  f"ví dụ: {missing[:5]}")
+    ids = shard(all_ids, args.num_shards, args.shard_id)
     if args.limit:
         ids = ids[:args.limit]
     out_name = lambda vid: os.path.join(args.output_dir, f"{vid}_one_peace_audio.npy")
@@ -141,13 +161,13 @@ def main():
     fail_log = os.path.join(args.output_dir, f"failed_audio_shard{args.shard_id}.txt")
     silent_log = os.path.join(args.output_dir, f"no_audio_track_shard{args.shard_id}.txt")
     for i, vid in enumerate(todo):
-        path = os.path.join(args.video_dir, vid + args.video_ext)
+        path = os.path.join(src_dir, vid + src_ext)
         t_vid = time.time()
         try:
-            wav = load_audio(path, SR, ffmpeg, args.resampler)
+            wav = load_audio_file(path, SR) if args.audio_dir else load_audio(path, SR, ffmpeg, args.resampler)
             if wav is None:
                 # video không có âm thanh: dùng im lặng cùng độ dài để số bước khớp visual
-                duration = probe_duration(path, ffmpeg) or 0.0
+                duration = probe_duration(path, ffmpeg or find_ffmpeg()) or 0.0
                 wav = np.zeros(int(duration * SR), dtype=np.float32)
                 with open(silent_log, "a", encoding="utf-8") as f:
                     f.write(vid + "\n")

@@ -195,18 +195,28 @@ def load_audio(path: str, sr: int = 16000, ffmpeg: Optional[str] = None,
     return np.ascontiguousarray(wav, dtype=np.float32)
 
 
+def load_audio_file(path: str, sr: int = 16000) -> Optional[np.ndarray]:
+    """Đọc file audio riêng (wav/flac/...) đúng như OnePeaceHubInterface.process_audio:
+    librosa.load(path, sr=16000) — mono = trung bình kênh, resample soxr_hq nếu sample rate khác 16 kHz.
+    None nếu file rỗng."""
+    import librosa
+    wav, _ = librosa.load(path, sr=sr)
+    return np.ascontiguousarray(wav, dtype=np.float32) if wav.size else None
+
+
 def num_windows(total: int, window: int, hop: int) -> int:
     return max(0, (total - window) // hop) + 1
 
 
-def list_video_ids(video_dir: str, ids_from: Optional[str] = None, ext: str = ".mp4") -> List[str]:
+def list_video_ids(video_dir: str, ids_from: Optional[str] = None, ext: str = ".mp4",
+                   must_exist: bool = True) -> List[str]:
     """Danh sách video id cần xử lý.
 
     - không có ids_from: mọi file *ext trong video_dir;
     - ids_from là file .json: annotation dạng UniAV ({"database": {vid: ...}}) hoặc
       youcookii_*_preprocess.json ({"database": {seg_id: {"video_id": ...}}});
     - ids_from là file .txt: mỗi dòng một id.
-    Chỉ giữ các id có file video tồn tại.
+    must_exist=True: chỉ giữ các id có file <id><ext> trong video_dir.
     """
     if ids_from is None:
         ids = sorted(os.path.splitext(f)[0] for f in os.listdir(video_dir) if f.endswith(ext))
@@ -217,6 +227,8 @@ def list_video_ids(video_dir: str, ids_from: Optional[str] = None, ext: str = ".
     else:
         with open(ids_from, "r", encoding="utf-8") as f:
             ids = sorted({line.strip() for line in f if line.strip()})
+    if not must_exist:
+        return ids
     return [i for i in ids if os.path.isfile(os.path.join(video_dir, i + ext))]
 
 

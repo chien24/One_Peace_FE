@@ -19,7 +19,7 @@ Kết quả cuối cùng: mỗi video có 2 file trong thư mục feature, đún
 | Code `One_Peace` | clone từ GitHub (vào Drive hoặc `/content`) | `.gitignore` đã loại checkpoint, nên repo không chứa model |
 | `onepeace_video_k400.pth` (6.6 GB) | upload lên Drive, thư mục tuỳ ý | checkpoint visual |
 | `one-peace-audio.pt` (5.7 GB) | upload lên Drive, thư mục tuỳ ý | checkpoint audio (không cần `one-peace.pt` 15.5 GB) |
-| `YouCookII/videos` (29 GB) | upload lên Drive | các file `<video_id>.mp4` |
+| `YouCookII/videos` (29 GB) | upload lên Drive | các file `<video_id>.mp4` **còn âm thanh** (hình cho visual, tiếng cho audio) |
 
 Ví dụ bố cục (đặt khác cũng được, chỉ cần sửa đường dẫn ở bước 1.2):
 ```
@@ -41,6 +41,10 @@ Clone code vào Drive (chạy trong một ô Colab sau khi mount Drive):
 ```
 Thư mục feature (`MyDrive/KL/feats/youcookii`) sẽ được tạo tự động.
 
+Không cần tách audio riêng: phần audio tự lấy track âm thanh trong mp4, giải mã và resample giống hệt
+`librosa.load(sr=16000)` của code gốc ONE-PEACE (đã kiểm tra: trùng tuyệt đối). Lưu ý: trình xem video của
+VS Code không phát tiếng, nên đừng dựa vào đó để kết luận mp4 không có âm thanh.
+
 ### 0.2 Dung lượng Drive cần thêm cho feature
 Với stride 0.5 s: khoảng **6 GB visual + 6 GB audio**.
 
@@ -57,7 +61,7 @@ Với stride 0.5 s: khoảng **6 GB visual + 6 GB audio**.
 ONE_PEACE_DIR = '/content/drive/MyDrive/KL/One_Peace'                         # thư mục code (bản clone)
 VIDEO_CKPT    = '/content/drive/MyDrive/KL/checkpoints/onepeace_video_k400.pth' # checkpoint visual
 AUDIO_CKPT    = '/content/drive/MyDrive/KL/checkpoints/one-peace-audio.pt'      # checkpoint audio
-VIDEO_DIR     = '/content/drive/MyDrive/KL/YouCookII/videos'                    # thư mục chứa .mp4
+VIDEO_DIR     = '/content/drive/MyDrive/KL/YouCookII/videos'                    # thư mục chứa .mp4 (còn âm thanh)
 FEAT_DIR      = '/content/drive/MyDrive/KL/feats/youcookii'                     # nơi ghi feature .npy
 ```
 Notebook tự copy 2 checkpoint từ Drive ra `/content/ckpt/` (ô A1, B1) để nạp nhanh hơn;

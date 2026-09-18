@@ -48,7 +48,7 @@ wav tách trước. Hai cách này cho cùng một kết quả vì đều đi qu
 | `onepeace_video_backbone.py` | Backbone video ONE-PEACE tách khỏi mmaction/mmcv, nạp `onepeace_video_k400.pth` |
 | `video_io.py` | Đọc frame (resize kiểu mmaction2) / audio (kiểu librosa) dạng stream, cửa sổ trượt, chia shard |
 | `extract_video_features.py` | Trích xuất visual → `*_one_peace_video_finetune.npy` |
-| `extract_audio_features.py` | Trích xuất audio → `*_one_peace_audio.npy` (dùng code gốc ONE-PEACE) |
+| `extract_audio_features.py` | Trích xuất audio → `*_one_peace_audio.npy` (dùng code gốc ONE-PEACE), audio lấy thẳng từ mp4 |
 | `slim_audio_checkpoint.py` | Tách nhánh audio từ `one-peace.pt` |
 | `onepeace_video_k400.pth` | Checkpoint video K400 (1.66B tham số) |
 | `one-peace.pt` | Checkpoint pretrain ONE-PEACE (3.89B tham số) — chỉ cần để tạo file dưới |
