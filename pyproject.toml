@@ -1,0 +1,20 @@
+[project]
+name = "one-peace-fe"
+version = "0.2.0"
+description = "Trích xuất đặc trưng ONE-PEACE (video K400 + audio) cho UniAV"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.1", "numpy", "einops", "opencv-python-headless"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E731", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["onepeace_video_backbone", "video_io"]

@@ -23,6 +23,8 @@ YouCookII chỉ có mô tả câu cho từng bước, KHÔNG có nhãn lớp, n�
       --output youcookii_all.json --video_dir D:/Học/KL/Data/YouCookII/videos
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -31,10 +33,11 @@ from collections import Counter, OrderedDict
 import numpy as np
 
 
-def load_recipe_names(path):
+def load_recipe_names(path: str | None) -> dict[str, str]:
+    """Đọc label_foodtype.csv ('id,tên') -> {id: tên}; rỗng nếu không có file."""
     names = {}
     if path:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 parts = [p.strip() for p in line.strip().split(",", 1)]
                 if len(parts) == 2 and parts[0].isdigit():
@@ -42,7 +45,7 @@ def load_recipe_names(path):
     return names
 
 
-def main():
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--train_json", required=True)
     p.add_argument("--val_json", required=True)
@@ -50,26 +53,34 @@ def main():
     p.add_argument("--label_mode", choices=["step", "recipe"], default="step")
     p.add_argument("--recipe_names", default=None, help="label_foodtype.csv (tuỳ chọn)")
     p.add_argument("--video_dir", default=None, help="bỏ các video không có file .mp4")
-    p.add_argument("--feat_dir", default=None,
-                   help="bỏ các video chưa có đủ 2 file feature *_one_peace_{video_finetune,audio}.npy")
-    args = p.parse_args()
+    p.add_argument(
+        "--feat_dir",
+        default=None,
+        help="bỏ các video chưa có đủ 2 file feature *_one_peace_{video_finetune,audio}.npy",
+    )
+    return p.parse_args()
 
+
+def main() -> None:
+    args = parse_args()
     recipe_names = load_recipe_names(args.recipe_names)
     database = OrderedDict()
     stats = Counter()
 
     for subset, path in (("training", args.train_json), ("validation", args.val_json)):
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             segs = json.load(f)["database"]
         # sắp theo video rồi theo thứ tự bước (seg id dạng <video_id>_<k>)
         items = sorted(segs.items(), key=lambda kv: (kv[1]["video_id"], int(kv[0].rsplit("_", 1)[-1])))
-        for seg_id, s in items:
+        for _seg_id, s in items:
             vid = s["video_id"]
             if args.video_dir and not os.path.isfile(os.path.join(args.video_dir, vid + ".mp4")):
                 stats[f"{subset}: bỏ đoạn (không có video)"] += 1
                 continue
-            if args.feat_dir and not all(os.path.isfile(os.path.join(args.feat_dir, f"{vid}_one_peace_{m}.npy"))
-                                         for m in ("video_finetune", "audio")):
+            if args.feat_dir and not all(
+                os.path.isfile(os.path.join(args.feat_dir, f"{vid}_one_peace_{m}.npy"))
+                for m in ("video_finetune", "audio")
+            ):
                 stats[f"{subset}: bỏ đoạn (chưa có feature)"] += 1
                 continue
 
@@ -86,21 +97,26 @@ def main():
             else:
                 rid = str(s["recipe_type"])
                 label = recipe_names.get(rid, f"recipe {rid}")
-            entry["annotations"].append({"segment": [start, end], "label": label,
-                                         "sentence": s.get("sentence", "")})
+            entry["annotations"].append(
+                {"segment": [start, end], "label": label, "sentence": s.get("sentence", "")}
+            )
             stats[f"{subset}: đoạn"] += 1
 
     # label_id theo thứ tự tên nhãn (ổn định giữa các lần chạy)
     labels = sorted({a["label"] for v in database.values() for a in v["annotations"]})
-    label_to_id = {l: i for i, l in enumerate(labels)}
+    label_to_id = {name: i for i, name in enumerate(labels)}
     for v in database.values():
         for a in v["annotations"]:
             a["label_id"] = label_to_id[a["label"]]
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
-        json.dump({"version": "YouCookII", "label_mode": args.label_mode, "database": database},
-                  f, ensure_ascii=False, indent=1)
+        json.dump(
+            {"version": "YouCookII", "label_mode": args.label_mode, "database": database},
+            f,
+            ensure_ascii=False,
+            indent=1,
+        )
 
     for subset in ("training", "validation"):
         vids = [v for v in database.values() if v["subset"] == subset]
@@ -108,9 +124,11 @@ def main():
         lens = [a["segment"][1] - a["segment"][0] for v in vids for a in v["annotations"]]
         durs = [v["duration"] for v in vids]
         if vids:
-            print(f"{subset}: {len(vids)} video, {sum(n_seg)} đoạn "
-                  f"(TB {np.mean(n_seg):.1f}/video), video TB {np.mean(durs):.0f}s, "
-                  f"đoạn TB {np.mean(lens):.1f}s (min {min(lens):.1f}, max {max(lens):.1f})")
+            print(
+                f"{subset}: {len(vids)} video, {sum(n_seg)} đoạn "
+                f"(TB {np.mean(n_seg):.1f}/video), video TB {np.mean(durs):.0f}s, "
+                f"đoạn TB {np.mean(lens):.1f}s (min {min(lens):.1f}, max {max(lens):.1f})"
+            )
     for k, v in sorted(stats.items()):
         if "bỏ" in k:
             print(f"  {k}: {v}")

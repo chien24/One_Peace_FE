@@ -14,6 +14,8 @@ bị tính hết vào bộ nhớ commit.)
   python slim_audio_checkpoint.py --input one-peace.pt --output one-peace-audio.pt
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import pickle
@@ -23,18 +25,26 @@ import numpy as np
 import torch
 
 _STORAGE_DTYPES = {
-    "FloatStorage": torch.float32, "HalfStorage": torch.float16, "BFloat16Storage": torch.bfloat16,
-    "DoubleStorage": torch.float64, "LongStorage": torch.int64, "IntStorage": torch.int32,
-    "ShortStorage": torch.int16, "CharStorage": torch.int8, "ByteStorage": torch.uint8,
+    "FloatStorage": torch.float32,
+    "HalfStorage": torch.float16,
+    "BFloat16Storage": torch.bfloat16,
+    "DoubleStorage": torch.float64,
+    "LongStorage": torch.int64,
+    "IntStorage": torch.int32,
+    "ShortStorage": torch.int16,
+    "CharStorage": torch.int8,
+    "ByteStorage": torch.uint8,
     "BoolStorage": torch.bool,
 }
 
 
 class _LazyTensor:
-    def __init__(self, storage, offset, size, stride):
+    """Tensor chưa đọc dữ liệu: chỉ giữ storage key, offset, shape, stride."""
+
+    def __init__(self, storage: tuple, offset: int, size: tuple, stride: tuple):
         self.storage, self.offset, self.size, self.stride = storage, offset, tuple(size), tuple(stride)
 
-    def numel(self):
+    def numel(self) -> int:
         return int(np.prod(self.size)) if self.size else 1
 
 
@@ -45,7 +55,9 @@ class _Unpickler(pickle.Unpickler):
         if module == "torch" and name in _STORAGE_DTYPES:
             return _STORAGE_DTYPES[name]
         if module == "torch._utils" and name == "_rebuild_tensor_v2":
-            return lambda storage, offset, size, stride, *args, **kw: _LazyTensor(storage, offset, size, stride)
+            return lambda storage, offset, size, stride, *args, **kw: _LazyTensor(
+                storage, offset, size, stride
+            )
         return super().find_class(module, name)
 
     def persistent_load(self, saved_id):
@@ -55,29 +67,42 @@ class _Unpickler(pickle.Unpickler):
         return (key, dtype, numel)
 
 
-def read_tensor(zf, prefix, lt: _LazyTensor) -> torch.Tensor:
+def read_tensor(zf: zipfile.ZipFile, prefix: str, lt: _LazyTensor) -> torch.Tensor:
+    """Đọc dữ liệu thật của một _LazyTensor từ file zip checkpoint."""
     key, dtype, numel = lt.storage
     raw = zf.read(f"{prefix}/data/{key}")
     storage = torch.frombuffer(bytearray(raw), dtype=dtype) if numel else torch.empty(0, dtype=dtype)
     return torch.as_strided(storage, lt.size, lt.stride, lt.offset).clone()
 
 
-def main():
-    p = argparse.ArgumentParser()
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--fp16", action="store_true", help="lưu fp16 cho nhẹ (mặc định giữ fp32 như checkpoint gốc)")
+    p.add_argument(
+        "--fp16", action="store_true", help="lưu fp16 cho nhẹ (mặc định giữ fp32 như checkpoint gốc)"
+    )
     p.add_argument("--onepeace_repo", default=None, help="(không còn cần, giữ để tương thích)")
-    args = p.parse_args()
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
 
     with zipfile.ZipFile(args.input) as zf:
         pkl_name = next(n for n in zf.namelist() if n.endswith("data.pkl"))
-        prefix = pkl_name[:-len("/data.pkl")]
+        prefix = pkl_name[: -len("/data.pkl")]
         with zf.open(pkl_name) as f:
             state = _Unpickler(f).load()
         print("Các khoá cấp cao:", list(state.keys()))
-        print("task:", state["cfg"]["task"].get("_name"), "| head_type:", state["cfg"]["task"].get("head_type"),
-              "| model:", state["cfg"]["model"].get("_name"))
+        print(
+            "task:",
+            state["cfg"]["task"].get("_name"),
+            "| head_type:",
+            state["cfg"]["task"].get("head_type"),
+            "| model:",
+            state["cfg"]["model"].get("_name"),
+        )
 
         kept, dropped, n_params = {}, 0, 0
         for k, lt in state["model"].items():
@@ -94,7 +119,7 @@ def main():
     slim = {k: state[k] for k in ("args", "cfg", "optimizer_history", "task_state") if k in state}
     slim["model"] = kept
     torch.save(slim, args.output)
-    print(f"Đã lưu {args.output} ({os.path.getsize(args.output) / 1024 ** 3:.2f} GB)")
+    print(f"Đã lưu {args.output} ({os.path.getsize(args.output) / 1024**3:.2f} GB)")
 
 
 if __name__ == "__main__":

@@ -58,11 +58,11 @@ Với stride 0.5 s: khoảng **6 GB visual + 6 GB audio**.
 
 ### 1.2 Sửa đường dẫn — chỉ ở ô số 2
 ```python
-ONE_PEACE_DIR = '/content/drive/MyDrive/KL/One_Peace'                         # thư mục code (bản clone)
-VIDEO_CKPT    = '/content/drive/MyDrive/KL/checkpoints/onepeace_video_k400.pth' # checkpoint visual
-AUDIO_CKPT    = '/content/drive/MyDrive/KL/checkpoints/one-peace-audio.pt'      # checkpoint audio
-VIDEO_DIR     = '/content/drive/MyDrive/KL/YouCookII/videos'                    # thư mục chứa .mp4 (còn âm thanh)
-FEAT_DIR      = '/content/drive/MyDrive/KL/feats/youcookii'                     # nơi ghi feature .npy
+ONE_PEACE_DIR = "/content/drive/MyDrive/KL/One_Peace"  # thư mục code (bản clone)
+VIDEO_CKPT = "/content/drive/MyDrive/KL/checkpoints/onepeace_video_k400.pth"  # checkpoint visual
+AUDIO_CKPT = "/content/drive/MyDrive/KL/checkpoints/one-peace-audio.pt"  # checkpoint audio
+VIDEO_DIR = "/content/drive/MyDrive/KL/YouCookII/videos"  # thư mục chứa .mp4 (còn âm thanh)
+FEAT_DIR = "/content/drive/MyDrive/KL/feats/youcookii"  # nơi ghi feature .npy
 ```
 Notebook tự copy 2 checkpoint từ Drive ra `/content/ckpt/` (ô A1, B1) để nạp nhanh hơn;
 hai biến `VIDEO_CKPT_LOCAL`, `AUDIO_CKPT_LOCAL` ở cuối ô 2 không cần sửa.
@@ -76,7 +76,9 @@ Các tham số còn lại trong ô 2 **giữ nguyên** để sát bài báo:
 |---|---|---|
 | `STRIDE` | 8 | bước cửa sổ visual = 8 frame = 0.5 s (như ActivityNet trong bài báo) |
 | `STRIDE_SEC` | `STRIDE / 16` | bước audio, tự khớp với visual — không sửa riêng |
-| `BATCH_VIDEO` | 4 | giảm xuống 2 hoặc 1 nếu báo hết bộ nhớ GPU (`OutOfMemoryError`) |
+| `BATCH_VIDEO` | 16 | A100: 16; T4: 8. Giảm nếu báo hết bộ nhớ GPU (`OutOfMemoryError`) |
+| `DTYPE_VIDEO` | `fp16` | cos ≥ 0.9999 so với fp32; chỉ đổi sang `bf16` nếu báo NaN/inf |
+| `COMPILE_VIDEO` | `True` | torch.compile, nhanh hơn; nếu lỗi biên dịch thì đặt `False` |
 | `BATCH_AUDIO` | 64 | giảm nếu hết bộ nhớ GPU |
 | `NUM_SHARDS`, `SHARD_ID` | 1, 0 | chia việc cho nhiều phiên Colab (mục 3) |
 
@@ -91,8 +93,8 @@ Các tham số còn lại trong ô 2 **giữ nguyên** để sát bài báo:
 | Ô | Việc | Kết quả mong đợi |
 |---|---|---|
 | A1 | Cài `einops`, copy checkpoint ra `/content` | vài phút (copy 6.6 GB) |
-| A2 | Kiểm tra tiền xử lý | dòng `clip @92.0s ... making a sandwich (1.00)` và dòng `fp16 vs fp32: ...` |
-| A3 | Đo tốc độ trên 200 clip | dòng cuối có `TB x.xx clip/s` → ghi lại con số này |
+| A2 | Kiểm tra tiền xử lý | dòng `clip @92.0s ... making a sandwich (1.00)`, dòng `fp16 vs fp32: cos min ~0.9999x` |
+| A3 | Đo tốc độ trên 400 clip | các dòng tiến độ in `x.xx clip/s` → ghi lại con số ở dòng cuối (các batch đầu có cả thời gian biên dịch) |
 | A4 | **Chạy thật** | mỗi video in 1 dòng `[i/N] <id>: (T, 1536) ...` |
 
 Ước lượng thời gian A4 ≈ `945000 / (clip/s ở A3)` giây cho toàn bộ 1500 video.
@@ -171,7 +173,7 @@ python extract_video_features.py \
     --video_dir  <thư mục mp4> \
     --output_dir <thư mục feature> \
     --ids_from   annotations/youcookii_all.json \
-    --stride 8 --batch_size 4
+    --stride 8 --batch_size 16 --compile
 
 # Audio (Python 3.10 + thư viện như ô B1; cần repo ONE-PEACE)
 python extract_audio_features.py \

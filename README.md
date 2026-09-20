@@ -33,8 +33,9 @@ Bài báo không ghi chi tiết cài đặt, nên mỗi bước được làm **
 |---|---|---|---|
 | Resize/crop frame | ffmpeg chỉ giải mã + đổi 16 fps, rồi **cv2 bilinear + công thức làm tròn của mmcv + CenterCrop của mmaction2** | `--resize_backend ffmpeg` | ffmpeg làm tròn chiều rộng lên số chẵn (456 thay vì 455) → crop lệch 1 pixel; feature: cos 0.993, sai khác tương đối **11.8%** |
 | Đọc audio | Giải mã PCM 16-bit ở sample rate gốc, mono = trung bình kênh, **librosa soxr_hq** → **trùng tuyệt đối** với `librosa.load(wav, sr=16000)` | `--resampler ffmpeg` | feature: cos TB 0.976, **thấp nhất 0.84** |
-| Độ chính xác | **fp32**, tắt TF32 trên GPU | `--dtype fp16/bf16` | Lưu trọng số audio fp16 rồi tính fp32: cos 1.00000. Suy luận fp16 trên GPU chưa đo — dùng `sanity_check_video.py --compare_fp16` |
-| Attention video | `scaled_dot_product_attention` | `--no_sdpa` (bmm gốc) | sai khác 5.5e-7 → tương đương |
+| Độ chính xác video | GPU: **fp16** (`--dtype auto`); CPU: fp32 | `--dtype fp32` (sát nhất, chậm ~3.4 lần), `bf16` | Đo trên RTX 3060, so với fp32 (tắt TF32): fp16 cos min **0.99995**, sai khác tương đối 7.3e-3; bf16 cos min 0.998 (5.1e-2) |
+| Độ chính xác audio | **fp32**, tắt TF32 trên GPU | `--dtype fp16/bf16` | Lưu trọng số audio fp16 rồi tính fp32: cos 1.00000 |
+| Attention video | `scaled_dot_product_attention` (kernel memory-efficient) | `--no_sdpa` (matmul gốc) | fp32: sai khác 9e-7 so với code cũ → tương đương |
 | Checkpoint audio | `one-peace-audio.pt` giữ **fp32** (5.72 GB) | `slim_audio_checkpoint.py --fp16` (2.86 GB) | cos 1.00000 |
 
 Những điểm **không thể biết chắc** vì tác giả không công bố code: cách đưa video về 16 fps
@@ -81,8 +82,9 @@ YouCookII: video dài TB ~315 s, tổng ~135 giờ cho 1500 video. Bài toán gi
 | **0.5 s (stride 8, như ActivityNet)** | **~945 nghìn** | **5.8 GB** |
 
 ⚠️ **Giới hạn thật là thời gian GPU, không phải dung lượng.** Mỗi clip visual là 16 × 257 token qua model
-1.66B tham số (CPU local: ~70 s/clip), và fp32 chậm hơn fp16 khoảng 2–3 lần. Nên dùng **A100** và đo trước
-bằng `--limit 1 --max_clips 200` (script in `clip/s`). Dùng `--num_shards/--shard_id` để chia nhiều phiên;
+1.66B tham số, khoảng **17 TFLOP / clip**: tốc độ bị giới hạn bởi sức tính GPU chứ không phải dung lượng checkpoint
+(CPU local: ~70 s/clip). Nên dùng **A100** và đo trước bằng `--limit 1 --max_clips 400` (script in `clip/s`).
+Chi tiết tốc độ đo được ở mục 7. Dùng `--num_shards/--shard_id` để chia nhiều phiên;
 script bỏ qua video đã có file nên phiên bị ngắt chỉ cần chạy lại.
 Audio nhẹ hơn nhiều (mỗi cửa sổ chỉ ~50 token).
 
@@ -103,13 +105,13 @@ Upload lên Google Drive: `YouCookII/videos` (29 GB) và thư mục `One_Peace` 
 # đo tốc độ
 !python extract_video_features.py --checkpoint /content/onepeace_video_k400.pth \
     --video_dir /content/drive/MyDrive/YouCookII/videos --output_dir /content/drive/MyDrive/feats/youcookii \
-    --ids_from annotations/youcookii_all.json --stride 8 --batch_size 4 --limit 1 --max_clips 200 --overwrite
+    --ids_from annotations/youcookii_all.json --stride 8 --batch_size 16 --compile --limit 1 --max_clips 400 --overwrite
 # chạy thật (ví dụ chia 4 phiên: shard_id 0..3)
 !python extract_video_features.py --checkpoint /content/onepeace_video_k400.pth \
     --video_dir /content/drive/MyDrive/YouCookII/videos --output_dir /content/drive/MyDrive/feats/youcookii \
-    --ids_from annotations/youcookii_all.json --stride 8 --batch_size 4 --num_shards 4 --shard_id 0
+    --ids_from annotations/youcookii_all.json --stride 8 --batch_size 16 --compile --num_shards 4 --shard_id 0
 ```
-Lệnh đo tốc độ chỉ lấy 200 clip đầu, nên phải có `--overwrite` ở lệnh chạy thật hoặc xoá file `.npy` đó.
+Lệnh đo tốc độ chỉ lấy 400 clip đầu, nên phải có `--overwrite` ở lệnh chạy thật hoặc xoá file `.npy` đó.
 Nếu hết VRAM thì giảm `--batch_size`.
 
 ### 5.2 Audio (cần môi trường Python 3.10 riêng)
@@ -199,3 +201,30 @@ TASK1:
 ```
 Không đặt `file_prefix` (ActivityNet dùng `v_`, YouCookII thì không). Loader `anet` đánh giá mAP ở
 tIoU 0.5:0.95; các bài trên YouCookII thường báo thêm tIoU 0.3/0.5/0.7.
+
+## 7. Tốc độ và các tối ưu đã làm (visual)
+
+Đo trên RTX 3060 12 GB, PyTorch 2.11, video 640x360, stride 8, chỉ tính forward model:
+
+| Cấu hình | clip/s | VRAM đỉnh | cos min so với fp32 |
+|---|---|---|---|
+| Code cũ, fp32 (tắt TF32) | 0.36 | 9.6 GB | 1 (chuẩn) |
+| Code cũ, fp16 | 0.89 | 5.0 GB | 0.99995 |
+| **Code mới, fp16** | **1.22** | **4.0 GB** | **0.99995** |
+| Code mới, fp16 + `--compile` | 1.32 | — | 0.99995 |
+
+Code cũ và code mới cho feature trùng nhau (fp32: sai khác 9e-7; chạy end-to-end fp16 trên 200 clip: cos min 0.999998).
+
+Các thay đổi:
+1. **Attention không gian rơi về nhánh "math" fp32.** Bias vị trí tương đối được tạo bằng `permute` nên không liền bộ nhớ,
+   cộng với tensor 3D, khiến `scaled_dot_product_attention` không dùng được kernel memory-efficient: cả 40 layer tính
+   attention 257x257 bằng GEMM fp32 + softmax riêng (~25% thời gian mỗi forward khi chạy fp16). Nay q/k/v là tensor 4D,
+   bias có dạng (1, H, L, L) liền bộ nhớ và được căn lề. Đây là nguyên nhân chính của mức tăng +38%.
+2. Bias không còn bị nhân bản thành (B·T·H, 257, 257) và ép kiểu lại ở mỗi layer (~400 MB mỗi lần với batch 4).
+3. Tensor batch-first, chỉ LayerNorm token CLS ở cuối, giữ feature trên GPU tới khi xong video
+   (không đồng bộ CPU–GPU ở mỗi batch), dùng pinned memory, mỗi video chỉ `probe` một lần.
+4. `prefetch` gom batch ngay ở thread nền; sửa lỗi thread nền bị kẹt (và ffmpeg chạy ngầm) khi dừng sớm với `--max_clips`.
+5. `--compile` (torch.compile): gộp LayerNorm/GELU/phép cộng; batch cuối mỗi video được pad cho đủ để không phải biên dịch lại.
+
+Sau khi sửa, ~80% thời gian GPU nằm ở phép nhân ma trận và các GEMM đã chạy gần trần fp16 của RTX 3060 (~25 TFLOPS).
+Muốn nhanh hơn nữa chỉ còn cách dùng GPU mạnh hơn (A100) hoặc chia nhiều phiên (`--num_shards`).

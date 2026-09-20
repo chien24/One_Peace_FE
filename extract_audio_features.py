@@ -14,7 +14,8 @@ Nguồn audio (chọn một):
   --video_dir <thư mục mp4>  : (mặc định dùng) lấy track âm thanh trong mp4, giải mã + resample
                                trùng tuyệt đối với librosa.load(sr=16000) của code gốc.
   --audio_dir <thư mục wav>  : đọc <video_id>.wav bằng librosa.load(sr=16000). Chỉ sát bản gốc nếu wav
-                               giữ sample rate gốc hoặc được resample bằng librosa (không phải ffmpeg -ar 16000).
+                               giữ sample rate gốc hoặc được resample bằng librosa
+                               (không phải ffmpeg -ar 16000).
 
 Cần repo ONE-PEACE + fairseq đi kèm (xem README.md), checkpoint one-peace.pt hoặc bản
 đã tách bằng slim_audio_checkpoint.py.
@@ -30,20 +31,31 @@ import math
 import os
 import sys
 import time
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from video_io import (find_ffmpeg, list_video_ids, load_audio, load_audio_file, num_windows, probe_duration,
-                      save_npy_atomic, shard)
+from video_io import (
+    find_ffmpeg,
+    list_video_ids,
+    load_audio,
+    load_audio_file,
+    num_windows,
+    probe_duration,
+    save_npy_atomic,
+    shard,
+)
 
 SR = 16000
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--onepeace_repo", required=True, help="thư mục clone của https://github.com/OFA-Sys/ONE-PEACE")
+    p.add_argument(
+        "--onepeace_repo", required=True, help="thư mục clone của https://github.com/OFA-Sys/ONE-PEACE"
+    )
     p.add_argument("--checkpoint", required=True, help="one-peace.pt hoặc one-peace-audio.pt")
     p.add_argument("--video_dir", default=None, help="thư mục mp4 (khi audio nằm trong video)")
     p.add_argument("--audio_dir", default=None, help="thư mục <video_id>.wav (khi đã tách audio riêng)")
@@ -54,10 +66,18 @@ def parse_args():
     p.add_argument("--window_sec", type=float, default=1.0)
     p.add_argument("--stride_sec", type=float, default=0.5)
     p.add_argument("--batch_size", type=int, default=64, help="số cửa sổ 1 s / lần forward")
-    p.add_argument("--dtype", choices=["float32", "fp16", "bf16"], default="float32",
-                   help="float32 = sát bản gốc nhất (mặc định)")
-    p.add_argument("--resampler", choices=["librosa", "ffmpeg"], default="librosa",
-                   help="librosa = giống librosa.load(sr=16000) trong process_audio gốc (mặc định)")
+    p.add_argument(
+        "--dtype",
+        choices=["float32", "fp16", "bf16"],
+        default="float32",
+        help="float32 = sát bản gốc nhất (mặc định)",
+    )
+    p.add_argument(
+        "--resampler",
+        choices=["librosa", "ffmpeg"],
+        default="librosa",
+        help="librosa = giống librosa.load(sr=16000) trong process_audio gốc (mặc định)",
+    )
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--shard_id", type=int, default=0)
@@ -69,7 +89,7 @@ def parse_args():
     return args
 
 
-def load_onepeace_audio_model(repo: str, checkpoint: str, device: str, dtype: str):
+def load_onepeace_audio_model(repo: str, checkpoint: str, device: str, dtype: str) -> Any:
     """Giống one_peace.models.from_pretrained(...), nhưng chỉ dựng nhánh audio (head_type='audio')
     và trỏ bpe_dir về repo để chạy được từ thư mục bất kỳ."""
     repo = os.path.abspath(repo)
@@ -127,23 +147,27 @@ def make_windows(wav: np.ndarray, window: int, hop: int) -> torch.Tensor:
     return F.layer_norm(chunks, (window,))
 
 
-def main():
+def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     window, hop = int(round(args.window_sec * SR)), int(round(args.stride_sec * SR))
 
-    src_dir, src_ext = (args.audio_dir, args.audio_ext) if args.audio_dir else (args.video_dir, args.video_ext)
+    src_dir, src_ext = (
+        (args.audio_dir, args.audio_ext) if args.audio_dir else (args.video_dir, args.video_ext)
+    )
     ffmpeg = None if args.audio_dir else find_ffmpeg()
     all_ids = list_video_ids(src_dir, args.ids_from, src_ext)
     if args.ids_from:
         wanted = list_video_ids(src_dir, args.ids_from, src_ext, must_exist=False)
         missing = sorted(set(wanted) - set(all_ids))
         if missing:
-            print(f"[warn] {len(missing)} video trong {args.ids_from} không có file {src_ext} trong {src_dir}, "
-                  f"ví dụ: {missing[:5]}")
+            print(
+                f"[warn] {len(missing)} video trong {args.ids_from} không có file {src_ext} trong {src_dir}, "
+                f"ví dụ: {missing[:5]}"
+            )
     ids = shard(all_ids, args.num_shards, args.shard_id)
     if args.limit:
-        ids = ids[:args.limit]
+        ids = ids[: args.limit]
     out_name = lambda vid: os.path.join(args.output_dir, f"{vid}_one_peace_audio.npy")
     todo = [v for v in ids if args.overwrite or not os.path.exists(out_name(v))]
     print(f"{len(ids)} video trong shard {args.shard_id}/{args.num_shards}, còn {len(todo)} video cần xử lý")
@@ -164,7 +188,9 @@ def main():
         path = os.path.join(src_dir, vid + src_ext)
         t_vid = time.time()
         try:
-            wav = load_audio_file(path, SR) if args.audio_dir else load_audio(path, SR, ffmpeg, args.resampler)
+            wav = (
+                load_audio_file(path, SR) if args.audio_dir else load_audio(path, SR, ffmpeg, args.resampler)
+            )
             if wav is None:
                 # video không có âm thanh: dùng im lặng cùng độ dài để số bước khớp visual
                 duration = probe_duration(path, ffmpeg or find_ffmpeg()) or 0.0
@@ -175,7 +201,7 @@ def main():
             feats = []
             with torch.inference_mode():
                 for b in range(0, len(windows), args.batch_size):
-                    src = hub.cast_data_dtype(windows[b:b + args.batch_size].to(args.device))
+                    src = hub.cast_data_dtype(windows[b : b + args.batch_size].to(args.device))
                     masks = torch.zeros(src.size(0), T + 1, dtype=torch.bool, device=args.device)
                     feats.append(hub.extract_audio_features(src, masks).float().cpu().numpy())
             feats = np.concatenate(feats, axis=0).astype(np.float32)
