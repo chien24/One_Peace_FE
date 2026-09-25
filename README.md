@@ -34,7 +34,7 @@ Bài báo không ghi chi tiết cài đặt, nên mỗi bước được làm **
 | Resize/crop frame | ffmpeg chỉ giải mã + đổi 16 fps, rồi **cv2 bilinear + công thức làm tròn của mmcv + CenterCrop của mmaction2** | `--resize_backend ffmpeg` | ffmpeg làm tròn chiều rộng lên số chẵn (456 thay vì 455) → crop lệch 1 pixel; feature: cos 0.993, sai khác tương đối **11.8%** |
 | Đọc audio | Giải mã PCM 16-bit ở sample rate gốc, mono = trung bình kênh, **librosa soxr_hq** → **trùng tuyệt đối** với `librosa.load(wav, sr=16000)` | `--resampler ffmpeg` | feature: cos TB 0.976, **thấp nhất 0.84** |
 | Độ chính xác video | GPU: **fp16** (`--dtype auto`); CPU: fp32 | `--dtype fp32` (sát nhất, chậm ~3.4 lần), `bf16` | Đo trên RTX 3060, so với fp32 (tắt TF32): fp16 cos min **0.99995**, sai khác tương đối 7.3e-3; bf16 cos min 0.998 (5.1e-2) |
-| Độ chính xác audio | **fp32**, tắt TF32 trên GPU | `--dtype fp16/bf16` | Lưu trọng số audio fp16 rồi tính fp32: cos 1.00000 |
+| Độ chính xác audio | GPU: **fp16** (`--dtype auto`); CPU: float32 | `--dtype float32` (sát nhất, chậm ~2.6 lần) | Đo trên RTX 3060: fp16 cos min **0.999996** so với float32 |
 | Attention video | `scaled_dot_product_attention` (kernel memory-efficient) | `--no_sdpa` (matmul gốc) | fp32: sai khác 9e-7 so với code cũ → tương đương |
 | Checkpoint audio | `one-peace-audio.pt` giữ **fp32** (5.72 GB) | `slim_audio_checkpoint.py --fp16` (2.86 GB) | cos 1.00000 |
 
@@ -126,9 +126,9 @@ Không cần `pip install ./fairseq`: script tự thêm `ONE-PEACE/fairseq` vào
 !pip install -q uv && uv venv --seed --python 3.10 /content/op310
 !/content/op310/bin/python -m pip install -q "pip==24.0"
 !/content/op310/bin/python -m pip install -q torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
-!/content/op310/bin/python -m pip install -q "numpy<2" hydra-core==1.0.7 omegaconf==2.0.6 antlr4-python3-runtime==4.8 \
-    bitarray sacrebleu tabulate regex timm==0.6.11 iopath tensorboardX pydub librosa==0.10.0 soundfile soxr einops \
-    opencv-python-headless scipy tqdm pillow imageio-ffmpeg
+!/content/op310/bin/python -m pip install -q "setuptools<81" "numpy<2" hydra-core==1.0.7 omegaconf==2.0.6 \
+    antlr4-python3-runtime==4.8 bitarray sacrebleu tabulate regex timm==0.6.11 iopath tensorboardX pydub \
+    librosa==0.10.0 resampy soundfile soxr einops opencv-python-headless scipy tqdm pillow imageio-ffmpeg
 !cp /content/drive/MyDrive/One_Peace/one-peace-audio.pt /content/
 
 %cd /content/drive/MyDrive/One_Peace
@@ -137,7 +137,10 @@ Không cần `pip install ./fairseq`: script tự thêm `ONE-PEACE/fairseq` vào
     --video_dir /content/drive/MyDrive/YouCookII/videos --output_dir /content/drive/MyDrive/feats/youcookii \
     --ids_from annotations/youcookii_all.json --stride_sec 0.5 --batch_size 64
 ```
-`librosa==0.10.0` là phiên bản ONE-PEACE ghi trong `requirements.txt`.
+`librosa==0.10.0` là phiên bản ONE-PEACE ghi trong `requirements.txt`. Hai ràng buộc dễ bỏ sót:
+`setuptools<81` (bản mới bỏ `pkg_resources`, mà librosa 0.10.0 vẫn import) và `torch`/`torchvision` phải
+cài chung một lệnh (nếu không `timm` kéo về bản torch mới nhất, là bản CPU).
+`resampy` cần cho `--res_type kaiser_best` (mặc định) — xem mục 9.
 `--stride_sec` phải bằng `stride / 16` của visual. Video không có track âm thanh được thay bằng im lặng
 cùng độ dài và ghi vào `no_audio_track_shard*.txt`.
 
@@ -228,3 +231,84 @@ Các thay đổi:
 
 Sau khi sửa, ~80% thời gian GPU nằm ở phép nhân ma trận và các GEMM đã chạy gần trần fp16 của RTX 3060 (~25 TFLOPS).
 Muốn nhanh hơn nữa chỉ còn cách dùng GPU mạnh hơn (A100) hoặc chia nhiều phiên (`--num_shards`).
+
+## 8. Kiểm chứng và tốc độ phần audio
+
+Đo trên RTX 3060, file wav 10 s (DESED), cửa sổ 1 s / bước 0.5 s:
+
+| Kiểm tra | Kết quả |
+|---|---|
+| So với `OnePeaceHubInterface.process_audio` gốc (cùng waveform 16000 mẫu) | **cos = 1.000000** |
+| `load_audio` (ffmpeg + librosa resample) so với `librosa.load(sr=16000)` | trùng từng mẫu (max \|diff\| = 0) |
+| Chuẩn L2 của feature | 1.0000 (khớp feature DESED của tác giả) |
+| Token mỗi cửa sổ 1 s | 49 |
+| fp16 so với float32 | cos min **0.999996** |
+| Tốc độ float32 / fp16 (batch 64) | 40 / 104 cửa sổ/s (VRAM 6.1 GB / ~3 GB) |
+| Thay attention bmm bằng SDPA | không nhanh hơn (117 so với 117 cửa sổ/s) vì chuỗi chỉ 50 token, nên giữ nguyên code gốc |
+
+Thay đổi: mặc định `--dtype auto` (fp16 trên GPU), và audio của video kế tiếp được giải mã ở thread nền.
+Với video 98 s, giải mã mất 1.5 s còn GPU mất 1.9 s, nên chạy song song rút thời gian mỗi video
+từ ~3.4 s xuống 1.8 s.
+
+## 9. Đối chiếu với feature DESED của tác giả UniAV
+
+Dữ liệu: 40 clip 10 s của tập `eval/public` (DESED), file wav trùng MD5 với bản phân phối chính thức
+(ngày 05/2019) nên **đầu vào giống hệt của tác giả**. Cấu hình: cửa sổ 1 s, bước 0,25 s, fp16.
+
+| Bộ lọc resample (`--res_type`) | cos TB | trung vị | min | số clip > 0.9 |
+|---|---|---|---|---|
+| **kaiser_best** (mặc định của librosa < 0.10 — **mặc định của script**) | **0.927** | 0.936 | 0.792 | 34/40 |
+| soxr_hq (mặc định của librosa >= 0.10) | 0.840 | 0.843 | 0.696 | 7/40 |
+
+Bộ lọc resample là yếu tố lớn nhất. Quét toàn bộ bộ lọc librosa (soxr_qq/lq/mq/hq/vhq, kaiser_best/fast,
+polyphase, fft, sinc_window) thì `kaiser_best` cho kết quả tốt nhất, `soxr_qq` tệ nhất (0.58–0.78).
+`torchaudio.functional.resample` (0.59–0.94) và `ffmpeg -ar 16000` đều kém hơn librosa.
+
+Các giả thuyết khác **đã loại trừ** (mọi phương án đều thấp hơn cấu hình hiện tại):
+
+| Thử nghiệm | cos TB |
+|---|---|
+| layer_norm cả clip / không chuẩn hoá | 0.60 / 0.34 |
+| Cửa sổ 0,5 s / 2 s | 0.66 / 0.56 |
+| Một lần forward cả clip rồi gộp token | 0.14 |
+| Pad cửa sổ lên 2–10 s kèm mask | 0.77–0.81 |
+| Bỏ `audio_proj` / trung bình token thay CLS | ~0.00 / 0.35 |
+| Chỉ lấy 1 kênh, lượng tử hoá int16, lệch pha ±10–50 ms | không cải thiện |
+| Checkpoint `finetune_al_retrieval.pt` | 0.59–0.65 |
+| Checkpoint `finetune_fsd50k.pt` (attn-pooling hoặc CLS) | ~0.00–0.03 |
+| `resampy 0.2.2` thay cho 0.4.3 (cùng kaiser_best) | 0.77–0.91 (thấp hơn) |
+
+Đã kiểm chứng:
+- Pipeline trùng tuyệt đối với `process_audio` gốc khi cùng waveform (cos = 1.000000);
+- `one-peace-audio.pt` **trùng từng bit** với nhánh audio của `one-peace.pt` chính thức (885/885 tensor,
+  không thiếu/thừa khoá) — tức checkpoint không phải nguyên nhân;
+- `slim_audio_checkpoint.py` đọc đúng: kiểm tra tương tự trên `finetune_al_retrieval.pt`;
+- Nén lại AAC/Opus/MP3 hay đổi âm lượng chỉ làm lệch ~1% (cos 0.99).
+
+**Phần còn lại (~0.07) chưa giải thích được.** Đầu vào, checkpoint và pipeline đều đã xác nhận trùng với
+bản chính thức, nên khả năng còn lại là phiên bản librosa/resampy tác giả dùng hoặc một chi tiết tiền xử lý
+họ không công bố. Với UniAV thì mức này không quan trọng, miễn là **mỗi dataset dùng một nguồn feature
+nhất quán** (tự trích xuất cả visual lẫn audio cho YouCookII, đừng trộn với feature của tác giả).
+
+`--res_type kaiser_best` cần gói `resampy`. Muốn bám sát ONE-PEACE (librosa 0.10) thì dùng `--res_type soxr_hq`.
+
+## 10. Các trường hợp đã kiểm tra bằng thực nghiệm
+
+| Trường hợp | Kết quả |
+|---|---|
+| Video không có track âm thanh | thay bằng im lặng cùng độ dài, ghi `no_audio_track_shard0.txt`, số bước khớp visual |
+| Audio < 1 s (wav 0,4 s) / video < 16 frame (0,4 s) | lặp lại cho đủ 1 cửa sổ, ra `(1, 1536)` |
+| `check_features.py` | `|T_visual − T_audio| = 0`, lệch thời lượng 0 s, báo đúng số file thiếu |
+| `build_youcookii_annotations.py` | bỏ video không có mp4, bỏ đoạn độ dài ≤ 0, cắt đoạn vượt `duration`, `--label_mode recipe` + `--recipe_names` gán đúng tên món, `--feat_dir` lọc đúng |
+| Chia shard (`--num_shards 2`) | 6 + 6 video, không trùng lặp, ghi cùng một thư mục |
+| Bị ngắt giữa lúc chạy (kill tiến trình) | không để lại `.npy` hỏng (ghi tạm rồi rename), không còn ffmpeg chạy ngầm |
+| Chạy lại sau khi ngắt | tự bỏ qua video đã có `.npy` |
+| `--resize_backend ffmpeg` (visual) | cos 0.992 so với cv2 |
+| `--resampler ffmpeg` (audio) | cos 0.935 so với librosa → **nên giữ librosa** |
+| `--dtype bf16` (audio) | cos 0.999 so với fp16 |
+| `--no_sdpa` (visual) | cos 0.999 so với SDPA |
+| `slim_audio_checkpoint.py --fp16` | ra file 2.86 GB, feature **cos 1.000000** so với checkpoint fp32 |
+| Kích thước `onepeace_video_k400.pth` | đúng 6 629 055 726 byte như tài liệu |
+
+**Lưu ý VRAM:** không chạy được 2 tiến trình trích xuất audio trên cùng một GPU 12 GB (mỗi tiến trình cần
+~6 GB lúc nạp checkpoint fp32 rồi mới chuyển fp16). Muốn chạy song song thì mỗi shard một GPU / một phiên Colab.

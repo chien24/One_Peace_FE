@@ -31,6 +31,7 @@ import math
 import os
 import sys
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -43,6 +44,7 @@ from video_io import (
     load_audio,
     load_audio_file,
     num_windows,
+    prefetch,
     probe_duration,
     save_npy_atomic,
     shard,
@@ -68,9 +70,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=64, help="số cửa sổ 1 s / lần forward")
     p.add_argument(
         "--dtype",
-        choices=["float32", "fp16", "bf16"],
-        default="float32",
-        help="float32 = sát bản gốc nhất (mặc định)",
+        choices=["auto", "float32", "fp16", "bf16"],
+        default="auto",
+        help="auto = fp16 trên GPU (nhanh ~2.6 lần, cos 0.999996 so với float32), float32 trên CPU",
+    )
+    p.add_argument(
+        "--res_type",
+        choices=["kaiser_best", "kaiser_fast", "soxr_hq", "soxr_vhq"],
+        default="kaiser_best",
+        help="bộ lọc resample của librosa. kaiser_best (mặc định của librosa < 0.10) khớp nhất với "
+        "feature DESED của tác giả UniAV: cos 0.93 so với 0.84 của soxr_hq (README mục 9); cần gói resampy",
+    )
+    p.add_argument(
+        "--file_prefix",
+        default="",
+        help="tiền tố tên file mà id trong annotation không có, ví dụ 'Y' cho tập validation của DESED "
+        "(id <id> ứng với file Y<id>.wav)",
     )
     p.add_argument(
         "--resampler",
@@ -147,6 +162,28 @@ def make_windows(wav: np.ndarray, window: int, hop: int) -> torch.Tensor:
     return F.layer_norm(chunks, (window,))
 
 
+def iter_audio(
+    todo: list[str], src_dir: str, src_ext: str, args: argparse.Namespace, ffmpeg: str | None
+) -> Iterator[tuple[str, np.ndarray | None, bool, Exception | None]]:
+    """(video_id, waveform 16 kHz, không có track audio?, lỗi nếu có) — chạy ở thread nền."""
+    for vid in todo:
+        path = os.path.join(src_dir, args.file_prefix + vid + src_ext)
+        try:
+            wav = (
+                load_audio_file(path, SR, args.res_type)
+                if args.audio_dir
+                else load_audio(path, SR, ffmpeg, args.resampler, args.res_type)
+            )
+            silent = wav is None
+            if silent:
+                # video không có âm thanh: dùng im lặng cùng độ dài để số bước khớp visual
+                duration = probe_duration(path, ffmpeg or find_ffmpeg()) or 0.0
+                wav = np.zeros(int(duration * SR), dtype=np.float32)
+            yield vid, wav, silent, None
+        except Exception as e:  # lỗi của một video không làm dừng cả shard
+            yield vid, None, False, e
+
+
 def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -156,13 +193,14 @@ def main() -> None:
         (args.audio_dir, args.audio_ext) if args.audio_dir else (args.video_dir, args.video_ext)
     )
     ffmpeg = None if args.audio_dir else find_ffmpeg()
-    all_ids = list_video_ids(src_dir, args.ids_from, src_ext)
+    all_ids = list_video_ids(src_dir, args.ids_from, src_ext, file_prefix=args.file_prefix)
     if args.ids_from:
         wanted = list_video_ids(src_dir, args.ids_from, src_ext, must_exist=False)
         missing = sorted(set(wanted) - set(all_ids))
         if missing:
             print(
-                f"[warn] {len(missing)} video trong {args.ids_from} không có file {src_ext} trong {src_dir}, "
+                f"[warn] {len(missing)} video trong {args.ids_from} không có file "
+                f"{args.file_prefix}<id>{src_ext} trong {src_dir}, "
                 f"ví dụ: {missing[:5]}"
             )
     ids = shard(all_ids, args.num_shards, args.shard_id)
@@ -174,46 +212,53 @@ def main() -> None:
     if not todo:
         return
 
+    dtype = args.dtype
+    if dtype == "auto":
+        dtype = "fp16" if args.device.startswith("cuda") else "float32"
     t0 = time.time()
-    hub = load_onepeace_audio_model(args.onepeace_repo, args.checkpoint, args.device, args.dtype)
-    if args.dtype == "float32" and args.device.startswith("cuda"):
+    hub = load_onepeace_audio_model(args.onepeace_repo, args.checkpoint, args.device, dtype)
+    if dtype == "float32" and args.device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
     T = hub._get_mask_indices_dims(window, hub.feature_encoder_spec)
-    print(f"Nạp model xong ({time.time() - t0:.0f}s)")
+    print(f"Nạp model xong ({time.time() - t0:.0f}s), dtype={dtype}", flush=True)
 
     fail_log = os.path.join(args.output_dir, f"failed_audio_shard{args.shard_id}.txt")
     silent_log = os.path.join(args.output_dir, f"no_audio_track_shard{args.shard_id}.txt")
-    for i, vid in enumerate(todo):
-        path = os.path.join(src_dir, vid + src_ext)
+    # đọc audio của video kế tiếp ở thread nền, GPU không phải chờ giải mã
+    source = prefetch(iter_audio(todo, src_dir, src_ext, args, ffmpeg), max_items=1)
+    for i, (vid, wav, silent, error) in enumerate(source):
         t_vid = time.time()
         try:
-            wav = (
-                load_audio_file(path, SR) if args.audio_dir else load_audio(path, SR, ffmpeg, args.resampler)
-            )
-            if wav is None:
-                # video không có âm thanh: dùng im lặng cùng độ dài để số bước khớp visual
-                duration = probe_duration(path, ffmpeg or find_ffmpeg()) or 0.0
-                wav = np.zeros(int(duration * SR), dtype=np.float32)
+            if error is not None:
+                raise error
+            if silent:
                 with open(silent_log, "a", encoding="utf-8") as f:
                     f.write(vid + "\n")
             windows = make_windows(wav, window, hop)
-            feats = []
+            chunks = []
             with torch.inference_mode():
                 for b in range(0, len(windows), args.batch_size):
                     src = hub.cast_data_dtype(windows[b : b + args.batch_size].to(args.device))
                     masks = torch.zeros(src.size(0), T + 1, dtype=torch.bool, device=args.device)
-                    feats.append(hub.extract_audio_features(src, masks).float().cpu().numpy())
-            feats = np.concatenate(feats, axis=0).astype(np.float32)
+                    chunks.append(hub.extract_audio_features(src, masks).float())
+            feats = torch.cat(chunks).cpu().numpy().astype(np.float32, copy=False)
+            if not np.isfinite(feats).all():
+                raise RuntimeError(f"feature có NaN/inf (tràn số với dtype={dtype}) -> thử --dtype float32")
             save_npy_atomic(out_name(vid), feats)
         except Exception as e:
-            print(f"[lỗi] {vid}: {e}")
+            print(f"[lỗi] {vid}: {e}", flush=True)
             with open(fail_log, "a", encoding="utf-8") as f:
-                f.write(f"{vid}\t{repr(e)}\n")
+                f.write(f"{vid}\t{e!r}\n")
             if isinstance(e, torch.cuda.OutOfMemoryError):
                 sys.exit(1)
             continue
-        print(f"[{i + 1}/{len(todo)}] {vid}: {feats.shape} trong {time.time() - t_vid:.1f}s")
+        elapsed = time.time() - t_vid
+        print(
+            f"[{i + 1}/{len(todo)}] {vid}: {feats.shape} trong {elapsed:.1f}s "
+            f"({len(feats) / elapsed:.1f} cửa sổ/s)",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

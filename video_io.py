@@ -239,14 +239,21 @@ def prefetch(it: Iterable, max_items: int) -> Iterator:
 
 
 def load_audio(
-    path: str, sr: int = 16000, ffmpeg: str | None = None, resampler: str = "librosa"
+    path: str,
+    sr: int = 16000,
+    ffmpeg: str | None = None,
+    resampler: str = "librosa",
+    res_type: str = "kaiser_best",
 ) -> np.ndarray | None:
     """Waveform mono float32 ở ``sr`` Hz; None nếu video không có track audio.
 
     resampler='librosa' (mặc định, sát bản gốc nhất): mô phỏng ``librosa.load(path, sr=16000)`` mà
         ``OnePeaceHubInterface.process_audio`` dùng — ffmpeg giải mã ở sample rate gốc,
-        mono = trung bình các kênh, resample bằng librosa (res_type mặc định 'soxr_hq').
+        mono = trung bình các kênh, resample bằng librosa.
     resampler='ffmpeg': ffmpeg tự downmix + resample (nhanh hơn, bộ lọc khác).
+    ``res_type``: bộ lọc resample của librosa. 'kaiser_best' = mặc định của librosa < 0.10 và là
+        lựa chọn khớp nhất với feature DESED của tác giả UniAV (xem README mục 9); 'soxr_hq' =
+        mặc định của librosa >= 0.10.
     """
     ffmpeg = ffmpeg or find_ffmpeg()
     base = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path, "-vn", "-sn"]
@@ -276,20 +283,19 @@ def load_audio(
     if native_sr != sr:
         import librosa
 
-        # = librosa.load của librosa 0.10
-        wav = librosa.resample(wav, orig_sr=native_sr, target_sr=sr, res_type="soxr_hq")
+        wav = librosa.resample(wav, orig_sr=native_sr, target_sr=sr, res_type=res_type)
     return np.ascontiguousarray(wav, dtype=np.float32)
 
 
-def load_audio_file(path: str, sr: int = 16000) -> np.ndarray | None:
-    """Đọc file audio riêng (wav/flac/...) đúng như ``OnePeaceHubInterface.process_audio``.
+def load_audio_file(path: str, sr: int = 16000, res_type: str = "kaiser_best") -> np.ndarray | None:
+    """Đọc file audio riêng (wav/flac/...) như ``OnePeaceHubInterface.process_audio``.
 
-    ``librosa.load(path, sr=16000)`` — mono = trung bình kênh, resample soxr_hq nếu sample rate
-    khác 16 kHz. None nếu file rỗng.
+    ``librosa.load(path, sr=16000, res_type=...)`` — mono = trung bình kênh, resample nếu sample
+    rate khác 16 kHz. None nếu file rỗng. Xem ``load_audio`` về ý nghĩa ``res_type``.
     """
     import librosa
 
-    wav, _ = librosa.load(path, sr=sr)
+    wav, _ = librosa.load(path, sr=sr, res_type=res_type)
     return np.ascontiguousarray(wav, dtype=np.float32) if wav.size else None
 
 
@@ -302,7 +308,11 @@ def num_windows(total: int, window: int, hop: int) -> int:
 
 
 def list_video_ids(
-    video_dir: str, ids_from: str | None = None, ext: str = ".mp4", must_exist: bool = True
+    video_dir: str,
+    ids_from: str | None = None,
+    ext: str = ".mp4",
+    must_exist: bool = True,
+    file_prefix: str = "",
 ) -> list[str]:
     """Danh sách video id cần xử lý.
 
@@ -310,10 +320,15 @@ def list_video_ids(
     - ids_from là file .json: annotation dạng UniAV (``{"database": {vid: ...}}``) hoặc
       youcookii_*_preprocess.json (``{"database": {seg_id: {"video_id": ...}}}``);
     - ids_from là file .txt: mỗi dòng một id.
-    must_exist=True: chỉ giữ các id có file ``<id><ext>`` trong video_dir.
+    must_exist=True: chỉ giữ các id có file ``<file_prefix><id><ext>`` trong video_dir.
+    ``file_prefix``: tiền tố của tên file mà id không có (DESED validation: file ``Y<id>.wav``).
     """
     if ids_from is None:
-        ids = sorted(os.path.splitext(f)[0] for f in os.listdir(video_dir) if f.endswith(ext))
+        ids = sorted(
+            os.path.splitext(f)[0][len(file_prefix) :]
+            for f in os.listdir(video_dir)
+            if f.endswith(ext) and f.startswith(file_prefix)
+        )
     elif ids_from.endswith(".json"):
         with open(ids_from, encoding="utf-8") as f:
             db = json.load(f)["database"]
@@ -323,7 +338,7 @@ def list_video_ids(
             ids = sorted({line.strip() for line in f if line.strip()})
     if not must_exist:
         return ids
-    return [i for i in ids if os.path.isfile(os.path.join(video_dir, i + ext))]
+    return [i for i in ids if os.path.isfile(os.path.join(video_dir, file_prefix + i + ext))]
 
 
 def shard(items: list[str], num_shards: int, shard_id: int) -> list[str]:

@@ -104,8 +104,8 @@ Nếu quá lâu so với thời lượng 1 phiên Colab, xem mục 3.
 
 | Ô | Việc | Kết quả mong đợi |
 |---|---|---|
-| B1 | Tạo môi trường Python 3.10, cài thư viện, copy checkpoint | ~5 phút, không có dòng `ERROR` |
-| B2 | **Chạy thật** | `Nạp model xong`, rồi mỗi video 1 dòng `[i/N] <id>: (T, 1536) ...` |
+| B1 | Tạo môi trường Python 3.10, cài thư viện, copy checkpoint | ~5 phút; dòng cuối phải in `torch 2.1.2+cu121 cuda True` |
+| B2 | **Chạy thật** | `Nạp model xong ... dtype=fp16`, rồi mỗi video 1 dòng `[i/N] <id>: (T, 1536) ...` |
 
 **Phần C — Kiểm tra** (sau khi xong cả A và B):
 
@@ -153,6 +153,9 @@ Mọi phiên phải dùng **cùng `NUM_SHARDS`** và cùng `FEAT_DIR`. Có thể
 | Ô A1/B1 copy checkpoint rất lâu hoặc lỗi | Drive đang đồng bộ file chưa xong; đợi upload xong hẳn. File copy dở thì xoá `/content/ckpt/*` rồi chạy lại ô |
 | B1 báo lỗi cài `omegaconf` | Chưa hạ pip → chạy lại cả ô B1 từ đầu |
 | B2 báo `No module named ...` | Chạy nhầm bằng `python` thay vì `/content/op310/bin/python`, hoặc chưa chạy B1 trong phiên này |
+| B2 báo `No module named 'pkg_resources'` | `setuptools` quá mới → chạy `!/content/op310/bin/python -m pip install "setuptools<81"` |
+| B2 báo `No module named 'resampy'` | thiếu gói cho `--res_type kaiser_best` → `!/content/op310/bin/python -m pip install resampy` (hoặc dùng `--res_type soxr_hq`) |
+| B2 chạy bằng CPU dù đã chọn GPU | `timm` đã kéo về bản torch CPU → chạy lại ô B1 từ đầu (ô này cài torch và torchvision cùng lệnh) |
 | B2 báo `checkpoint không khớp model` | `AUDIO_CKPT` trỏ sai file → phải là `one-peace-audio.pt` tạo bởi `slim_audio_checkpoint.py` |
 | Có file `failed_video_shard*.txt` / `failed_audio_shard*.txt` trong `FEAT_DIR` | Danh sách video lỗi (thường do mp4 hỏng). Mở file xem lý do; chạy lại ô chạy thật để thử lại các video đó |
 | Có file `no_audio_track_shard*.txt` | Video không có âm thanh → đã được thay bằng im lặng, không cần làm gì |
@@ -188,6 +191,15 @@ python extract_audio_features.py \
 python check_features.py --anno annotations/youcookii_all.json --feat_dir <thư mục feature> --stride 8
 ```
 Chạy trên CPU vẫn được (tự nhận khi không có GPU) nhưng rất chậm: ~70 s cho mỗi clip visual, ~1.2 lần thời lượng video cho audio.
+
+Hai tham số audio đáng lưu ý:
+- `--res_type` (mặc định `kaiser_best`, cần gói `resampy`): bộ lọc resample. Đây là yếu tố ảnh hưởng lớn nhất
+  khi đối chiếu với feature của tác giả (cos 0.93 so với 0.84 của `soxr_hq`) — xem mục 9 của [README.md](README.md).
+- `--file_prefix`: dùng khi tên file có tiền tố mà id trong annotation không có, ví dụ tập validation của DESED
+  (`--file_prefix Y` cho file `Y<id>.wav`).
+
+Không chạy 2 tiến trình trích xuất trên cùng một GPU 12 GB (tràn VRAM lúc nạp checkpoint). Chia việc bằng
+`--num_shards` thì mỗi shard nên ở một phiên Colab / một GPU riêng.
 
 ---
 
