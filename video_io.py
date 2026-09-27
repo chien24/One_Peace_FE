@@ -422,9 +422,17 @@ def load_done_ids(output_dir: str, suffix: str, done_prefix: str, extra: Iterabl
             elif f.startswith(done_prefix) and f.endswith(".txt"):
                 from_txt(os.path.join(d, f))
 
+    def to_id(line: str) -> str:
+        # mỗi dòng: id, tên file .npy/.mp4 hoặc đường dẫn (vd. tạo bằng `ls`) -> id
+        name = line.split("\t")[0].strip().strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
+        for ext in (suffix, ".mp4", ".wav"):
+            if name.endswith(ext):
+                return name[: -len(ext)]
+        return name
+
     def from_txt(p: str) -> None:
-        with open(p, encoding="utf-8") as fh:
-            done.update(line.split("\t")[0].strip() for line in fh if line.strip())
+        with open(p, encoding="utf-8-sig") as fh:  # -sig: bỏ BOM nếu file soạn bằng Notepad
+            done.update(to_id(line) for line in fh if line.strip())
 
     if os.path.isdir(output_dir):
         from_dir(output_dir)
