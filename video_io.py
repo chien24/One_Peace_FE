@@ -172,6 +172,53 @@ def iter_clips(frames: Iterable[np.ndarray], num_frames: int = 16, stride: int =
         yield np.stack(clip[:num_frames])
 
 
+def iter_clip_chunks(
+    frames: Iterable[np.ndarray], num_frames: int, stride: int, clips_per_chunk: int, limit: int | None = None
+) -> Iterator[tuple[np.ndarray, int]]:
+    """Giống ``iter_batches(iter_clips(...))`` nhưng không nhân bản frame: trả về (khối frame, số clip m).
+
+    Khối gồm (m - 1) * stride + num_frames frame liên tiếp; clip thứ k của khối là
+    ``khối[k * stride : k * stride + num_frames]`` (dựng lại trên GPU bằng ``unfold``). Với stride 8,
+    lượng dữ liệu phải chuyển chỉ còn khoảng một nửa so với gửi từng clip. Cùng quy ước với
+    ``iter_clips``: video ngắn hơn ``num_frames`` thì lặp frame cuối cho đủ một clip.
+    """
+    buf: list[np.ndarray] = []
+    buf_start = 0  # chỉ số frame của buf[0]
+    first = 0  # chỉ số clip đầu tiên của khối đang gom
+    total = 0  # số clip đã trả về
+    n_frames = 0
+
+    def take(m: int) -> np.ndarray:
+        start = first * stride - buf_start
+        return np.stack(buf[start : start + (m - 1) * stride + num_frames])
+
+    for idx, frame in enumerate(frames):
+        n_frames = idx + 1
+        buf.append(frame)
+        m = clips_per_chunk if limit is None else min(clips_per_chunk, limit - total)
+        # clip cuối của khối (chỉ số first + m - 1) kết thúc ở frame (first + m - 1) * stride + num_frames - 1
+        if idx == (first + m - 1) * stride + num_frames - 1:
+            yield take(m), m
+            first += m
+            total += m
+            if limit is not None and total >= limit:
+                return
+            drop = min(first * stride - buf_start, len(buf))
+            del buf[:drop]
+            buf_start += drop
+    if n_frames == 0:
+        return
+    if n_frames < num_frames:  # video quá ngắn: một clip, lặp frame cuối
+        if total == 0:
+            yield np.stack(buf + [buf[-1]] * (num_frames - len(buf))), 1
+        return
+    m = (n_frames - num_frames) // stride + 1 - first  # các clip trọn vẹn còn lại
+    if limit is not None:
+        m = min(m, limit - total)
+    if m > 0:
+        yield take(m), m
+
+
 def iter_batches(
     items: Iterable[np.ndarray], batch_size: int, limit: int | None = None
 ) -> Iterator[np.ndarray]:
@@ -353,3 +400,144 @@ def save_npy_atomic(path: str, arr: np.ndarray) -> None:
     tmp = path + ".tmp.npy"
     np.save(tmp, arr)
     os.replace(tmp, path)
+
+
+# --------------------------------------------------------------------------- resume
+
+
+def load_done_ids(output_dir: str, suffix: str, done_prefix: str, extra: Iterable[str] = ()) -> set[str]:
+    """ID đã trích xuất xong, gộp từ:
+
+    - file ``<id><suffix>`` trong ``output_dir`` (một lần ``listdir``, nhanh hơn hỏi từng file trên Drive);
+    - các file ``<done_prefix>*.txt`` trong ``output_dir`` (script tự ghi thêm mỗi khi xong một video);
+    - ``extra``: file .txt (mỗi dòng một id, cột đầu nếu có tab) hoặc thư mục chứa ``<id><suffix>``
+      (ví dụ output của phiên Kaggle trước, gắn vào làm input).
+    """
+    done: set[str] = set()
+
+    def from_dir(d: str) -> None:
+        for f in os.listdir(d):
+            if f.endswith(suffix) and not f.endswith(".tmp.npy"):
+                done.add(f[: -len(suffix)])
+            elif f.startswith(done_prefix) and f.endswith(".txt"):
+                from_txt(os.path.join(d, f))
+
+    def from_txt(p: str) -> None:
+        with open(p, encoding="utf-8") as fh:
+            done.update(line.split("\t")[0].strip() for line in fh if line.strip())
+
+    if os.path.isdir(output_dir):
+        from_dir(output_dir)
+    for p in extra:
+        if os.path.isdir(p):
+            from_dir(p)
+        elif os.path.isfile(p):
+            from_txt(p)
+        else:
+            print(f"[warn] --done_list: không tìm thấy {p}", flush=True)
+    return done
+
+
+def append_line(path: str, line: str) -> None:
+    """Ghi thêm một dòng (mở/đóng mỗi lần để dòng đã ghi không mất khi phiên bị tắt đột ngột)."""
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+# --------------------------------------------------------------------------- song song
+
+
+_WORKER_DONE = "__worker_done__"
+
+
+def _parallel_worker(fn, task_q, out_q) -> None:
+    while True:
+        item = task_q.get()
+        if item is None:
+            break
+        try:
+            for out in fn(item):
+                out_q.put(out)
+        except BaseException as e:  # fn phải tự báo lỗi từng item; tới đây là lỗi ngoài dự kiến
+            out_q.put(("__error__", item, repr(e)))
+    out_q.put(_WORKER_DONE)
+
+
+def iter_parallel(fn, items: list, workers: int, max_queue: int) -> Iterator:
+    """Chạy generator ``fn(item)`` cho từng item trên ``workers`` tiến trình, trả kết quả theo thứ tự xong.
+
+    Mỗi item do đúng một tiến trình xử lý, nên các output của cùng một item vẫn đúng thứ tự.
+    ``max_queue`` giới hạn số output chờ trong hàng đợi (chặn RAM khi GPU chậm hơn khâu giải mã).
+    Tiến trình riêng (không phải thread) để giải mã/resize không tranh GIL với vòng lặp GPU.
+    ``fn`` phải pickle được (hàm ở cấp module, hoặc functools.partial của nó).
+    """
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    task_q, out_q = ctx.Queue(), ctx.Queue(maxsize=max_queue)
+    for item in items:
+        task_q.put(item)
+    for _ in range(workers):
+        task_q.put(None)
+    procs = [
+        ctx.Process(target=_parallel_worker, args=(fn, task_q, out_q), daemon=True) for _ in range(workers)
+    ]
+    for p in procs:
+        p.start()
+    try:
+        alive = workers
+        while alive:
+            out = out_q.get()
+            if isinstance(out, str) and out == _WORKER_DONE:
+                alive -= 1
+                continue
+            yield out
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+        for p in procs:
+            p.join(timeout=5)
+
+
+def resolve_gpus(spec: str) -> list[int]:
+    """'auto' = mọi GPU thấy được; '0,1' = danh sách; '' / 'cpu' / không có GPU = []."""
+    import torch
+
+    if not torch.cuda.is_available() or spec in ("", "cpu"):
+        return []
+    if spec == "auto":
+        return list(range(torch.cuda.device_count()))
+    return [int(g) for g in spec.split(",") if g.strip()]
+
+
+def auto_workers(n_gpus: int, per_gpu_max: int = 3) -> int:
+    """Số tiến trình giải mã cho mỗi GPU: chia đều CPU (ffmpeg tự dùng nhiều luồng nên chỉ lấy một nửa)."""
+    cpus = os.cpu_count() or 2
+    return max(1, min(per_gpu_max, cpus // (2 * max(n_gpus, 1))))
+
+
+def run_on_gpus(target, todo: list, gpus: list[int], *extra) -> None:
+    """Chia ``todo`` xen kẽ cho từng GPU, mỗi GPU một tiến trình: ``target(todo_con, device, rank, *extra)``.
+
+    Một GPU (hoặc CPU) thì chạy thẳng trong tiến trình hiện tại. Lỗi ở tiến trình con -> thoát mã != 0.
+    """
+    if len(gpus) <= 1:
+        target(todo, f"cuda:{gpus[0]}" if gpus else "cpu", 0, *extra)
+        return
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    lock = ctx.Lock()  # nạp checkpoint lần lượt từng GPU, tránh 2 bản 6 GB cùng lúc trong RAM
+    procs = []
+    for rank, g in enumerate(gpus):
+        p = ctx.Process(target=target, args=(todo[rank :: len(gpus)], f"cuda:{g}", rank, *extra, lock))
+        p.start()
+        procs.append(p)
+    for p in procs:
+        p.join()
+    bad = [p.exitcode for p in procs if p.exitcode != 0]
+    if bad:
+        raise SystemExit(f"{len(bad)} tiến trình GPU lỗi (exit code {bad})")

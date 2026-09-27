@@ -11,6 +11,8 @@
 *.tmp.npy
 failed_*_shard*.txt
 no_audio_track_shard*.txt
+done_video*.txt
+done_audio*.txt
 bench/
 feats/
 

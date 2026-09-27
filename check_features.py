@@ -17,7 +17,8 @@ import numpy as np
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--anno", required=True)
-    p.add_argument("--feat_dir", required=True)
+    p.add_argument("--feat_dir", required=True, help="thư mục feature visual (và audio nếu chung)")
+    p.add_argument("--audio_feat_dir", default=None, help="thư mục feature audio nếu để riêng")
     p.add_argument("--stride", type=int, default=8, help="bước (frame @16fps) đã dùng khi trích xuất")
     p.add_argument("--num_frames", type=int, default=16)
     p.add_argument("--fps", type=int, default=16)
@@ -32,7 +33,7 @@ def main() -> None:
     missing, bad, rows = [], [], []
     for vid, v in db.items():
         fv = os.path.join(args.feat_dir, f"{vid}_one_peace_video_finetune.npy")
-        fa = os.path.join(args.feat_dir, f"{vid}_one_peace_audio.npy")
+        fa = os.path.join(args.audio_feat_dir or args.feat_dir, f"{vid}_one_peace_audio.npy")
         if not (os.path.isfile(fv) and os.path.isfile(fa)):
             missing.append(vid)
             continue
