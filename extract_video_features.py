@@ -115,7 +115,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num_shards", type=int, default=1, help="chia danh sách video cho nhiều phiên chạy")
     p.add_argument("--shard_id", type=int, default=0)
-    p.add_argument("--limit", type=int, default=None, help="chỉ xử lý N video đầu (để thử)")
+    p.add_argument(
+        "--limit", type=int, default=None, help="lần chạy này chỉ xử lý N video chưa xong rồi dừng"
+    )
     p.add_argument("--max_clips", type=int, default=None, help="chỉ lấy N clip đầu mỗi video (để thử)")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--log_every", type=float, default=60, help="in tiến độ mỗi N giây")
@@ -347,8 +349,6 @@ def main() -> None:
     args.n_gpus = max(len(gpus), 1)
 
     ids = shard(list_video_ids(args.video_dir, args.ids_from, args.video_ext), args.num_shards, args.shard_id)
-    if args.limit:
-        ids = ids[: args.limit]
     done = (
         set()
         if args.overwrite
@@ -360,6 +360,9 @@ def main() -> None:
         f"còn {len(todo)} video cần xử lý | GPU: {gpus or 'không có (CPU)'}",
         flush=True,
     )
+    if args.limit and len(todo) > args.limit:
+        todo = todo[: args.limit]
+        print(f"--limit {args.limit}: lần này chỉ xử lý {len(todo)} video", flush=True)
     if todo:
         run_on_gpus(run_gpu, todo, gpus, args)
 

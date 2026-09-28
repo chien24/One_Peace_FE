@@ -130,7 +130,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--shard_id", type=int, default=0)
-    p.add_argument("--limit", type=int, default=None)
+    p.add_argument(
+        "--limit", type=int, default=None, help="lần chạy này chỉ xử lý N video chưa xong rồi dừng"
+    )
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
     if bool(args.video_dir) == bool(args.audio_dir):
@@ -333,8 +335,6 @@ def main() -> None:
                 f"ví dụ: {missing[:5]}"
             )
     ids = shard(all_ids, args.num_shards, args.shard_id)
-    if args.limit:
-        ids = ids[: args.limit]
     done = (
         set()
         if args.overwrite
@@ -346,6 +346,9 @@ def main() -> None:
         f"còn {len(todo)} video cần xử lý | GPU: {gpus or 'không có (CPU)'}",
         flush=True,
     )
+    if args.limit and len(todo) > args.limit:
+        todo = todo[: args.limit]
+        print(f"--limit {args.limit}: lần này chỉ xử lý {len(todo)} video", flush=True)
     if todo:
         run_on_gpus(run_gpu, todo, gpus, args)
 
